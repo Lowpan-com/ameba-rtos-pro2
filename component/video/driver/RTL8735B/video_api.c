@@ -2674,34 +2674,44 @@ hal_video_adapter_t *video_init(int iq_start_addr, int sensor_start_addr)
 	 * (clock gated for nanoseconds only, negligible reset risk).  Cortex-M
 	 * SRAM is retained through reset so the co-processor restarts with its
 	 * FCS-loaded firmware, opens ISP (sensor I2C is ready after video_init_peri
-	 * below) → 0x1718, and the subsequent video_open() succeeds. */
+	 * below) → 0x1718, and the subsequent video_open() succeeds.
+	 *
+	 * Heap note: video_voe_presetting() (module_video.c) returns early via the
+	 * FCS fast-path (voe_boot_fsc_status() == true) and does NOT call
+	 * video_set_voe_heap(), so voe_info.voe_heap_size is 0 here.  Use the FCS
+	 * heap from isp_boot — the same source the FCS shortcut uses at line below.
+	 */
 #define _VOE_STATUS_REG  (*(volatile u32 *)0x40009154u)
 #define _VOE_ISP_BITS    0x600u   /* bits 9,10: set when ISP is open */
 	if (hal_voe_ready() == OK &&
 	    (_VOE_STATUS_REG & _VOE_ISP_BITS) == 0 &&
 	    isp_boot->fcs_status == 1) {
 
-		video_dprintf(VIDEO_LOG_MSG, "[video_init] VOE stuck after reset (reg=0x%08x) — restarting co-proc\r\n",
-					  _VOE_STATUS_REG);
+		/* Use the heap allocated by the FCS bootloader. */
+		u32 fcs_heap_addr = isp_boot->voe_heap_addr;
+		u32 fcs_heap_size = isp_boot->voe_heap_size;
 
-		if (!voe_info.voe_heap_addr) {
-			voe_info.voe_heap_addr = (uint32_t)malloc(voe_info.voe_heap_size);
-			video_dprintf(VIDEO_LOG_MSG, "voe_heap malloc 0x%x, size %d\n",
-						  voe_info.voe_heap_addr, voe_info.voe_heap_size);
-			if (!voe_info.voe_heap_addr) {
-				video_dprintf(VIDEO_LOG_ERR, "voe_heap malloc fail in stuck recovery\n");
-				return NULL;
-			}
+		video_dprintf(VIDEO_LOG_MSG,
+					  "[video_init] VOE stuck (reg=0x%08x) — restarting co-proc with FCS heap 0x%08x sz %d\r\n",
+					  _VOE_STATUS_REG, fcs_heap_addr, fcs_heap_size);
+
+		if (!fcs_heap_addr || !fcs_heap_size) {
+			video_dprintf(VIDEO_LOG_ERR, "[video_init] invalid FCS heap — cannot recover\n");
+			return NULL;
 		}
 
 		video_init_peri();
-		video_clean_invalidate_heap((uint32_t *)voe_info.voe_heap_addr, voe_info.voe_heap_size);
+		video_clean_invalidate_heap((uint32_t *)fcs_heap_addr, fcs_heap_size);
 
-		res = hal_video_init((uint32_t *)voe_info.voe_heap_addr, voe_info.voe_heap_size);
+		res = hal_video_init((uint32_t *)fcs_heap_addr, fcs_heap_size);
 		if (res != OK) {
 			video_dprintf(VIDEO_LOG_ERR, "[video_init] hal_video_init failed in stuck recovery\n");
 			return NULL;
 		}
+
+		/* Mirror FCS shortcut: set voe_info heap so callers see consistent state. */
+		voe_info.voe_heap_addr = fcs_heap_addr;
+		voe_info.voe_heap_size = fcs_heap_size;
 
 		/* Co-processor is now running.  Clear fcs_status so neither the FCS
 		 * shortcut (line below) nor the full-init path is taken again. */
