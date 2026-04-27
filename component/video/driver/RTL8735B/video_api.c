@@ -2655,6 +2655,62 @@ hal_video_adapter_t *video_init(int iq_start_addr, int sensor_start_addr)
 	}
 	voe_info.iq_addr = iq_start_addr;
 	voe_info.sensor_addr = sensor_start_addr;
+
+	/* === WARM RESET VOE STUCK STATE RECOVERY ===
+	 *
+	 * After a warm reset, the bootloader FCS may time out opening the ISP,
+	 * leaving 0x40009154 = 0x1118 (bits 9,10 clear = ISP never opened) while
+	 * hal_voe_ready() still returns OK (bit 8 set, clock on).
+	 *
+	 * The normal code path below takes the FCS shortcut (fcs_status == 1) and
+	 * calls hal_video_get_adp(), but the co-processor is not streaming so
+	 * hal_video_open() times out.  module_video.c then calls video_deinit()
+	 * which gates the VOE clock.  The subsequent CMD_VIDEO_APPLY (ch1) enters
+	 * the full-init path and crashes inside hal_video_load_sensor() because the
+	 * sensor firmware header in flash is read with a wrong size field.
+	 *
+	 * Fix: detect the stuck state and call hal_video_init() directly.
+	 * hal_video_init() → hal_voe_init() writes sys_ctrl = 1, 3, 7 in ~1 µs
+	 * (clock gated for nanoseconds only, negligible reset risk).  Cortex-M
+	 * SRAM is retained through reset so the co-processor restarts with its
+	 * FCS-loaded firmware, opens ISP (sensor I2C is ready after video_init_peri
+	 * below) → 0x1718, and the subsequent video_open() succeeds. */
+#define _VOE_STATUS_REG  (*(volatile u32 *)0x40009154u)
+#define _VOE_ISP_BITS    0x600u   /* bits 9,10: set when ISP is open */
+	if (hal_voe_ready() == OK &&
+	    (_VOE_STATUS_REG & _VOE_ISP_BITS) == 0 &&
+	    isp_boot->fcs_status == 1) {
+
+		video_dprintf(VIDEO_LOG_MSG, "[video_init] VOE stuck after reset (reg=0x%08x) — restarting co-proc\r\n",
+					  _VOE_STATUS_REG);
+
+		if (!voe_info.voe_heap_addr) {
+			voe_info.voe_heap_addr = (uint32_t)malloc(voe_info.voe_heap_size);
+			video_dprintf(VIDEO_LOG_MSG, "voe_heap malloc 0x%x, size %d\n",
+						  voe_info.voe_heap_addr, voe_info.voe_heap_size);
+			if (!voe_info.voe_heap_addr) {
+				video_dprintf(VIDEO_LOG_ERR, "voe_heap malloc fail in stuck recovery\n");
+				return NULL;
+			}
+		}
+
+		video_init_peri();
+		video_clean_invalidate_heap((uint32_t *)voe_info.voe_heap_addr, voe_info.voe_heap_size);
+
+		res = hal_video_init((uint32_t *)voe_info.voe_heap_addr, voe_info.voe_heap_size);
+		if (res != OK) {
+			video_dprintf(VIDEO_LOG_ERR, "[video_init] hal_video_init failed in stuck recovery\n");
+			return NULL;
+		}
+
+		/* Co-processor is now running.  Clear fcs_status so neither the FCS
+		 * shortcut (line below) nor the full-init path is taken again. */
+		isp_boot->fcs_status = 0;
+		video_dprintf(VIDEO_LOG_MSG, "[video_init] stuck recovery OK (reg=0x%08x)\r\n",
+					  _VOE_STATUS_REG);
+	}
+	/* === END WARM RESET VOE STUCK STATE RECOVERY === */
+
 	if (hal_voe_ready() != OK) {
 		extern int __voe_code_start__[];
 		if (!hal_voe_fcs_check_OK()) {
