@@ -95,7 +95,7 @@ a lot of data that needs to be copied, this should be set high. */
 #elif defined(ENABLE_AMAZON_COMMON)
 #define PBUF_POOL_SIZE          30
 #else
-#define PBUF_POOL_SIZE          20
+#define PBUF_POOL_SIZE          100
 #endif
 
 /* IP_REASS_MAX_PBUFS: Total maximum amount of pbufs waiting to be reassembled.*/
@@ -337,8 +337,8 @@ extern unsigned int sys_now(void);
 #endif
 
 #if defined(CONFIG_INIC_IPC_HIGH_TP) && CONFIG_INIC_IPC_HIGH_TP
-#undef MEM_SIZE
-#define MEM_SIZE (34*1024)
+##undef MEM_SIZE
+##define MEM_SIZE (34*1024)
 
 #undef MEMP_NUM_TCP_SEG
 #define MEMP_NUM_TCP_SEG        132
@@ -575,4 +575,41 @@ Certain platform allows computing and verifying the IP, UDP, TCP and ICMP checks
 /* hook function to support ip route based on src ip */
 #define LWIP_HOOK_IP4_ROUTE_SRC         LwIP_ip4_route_src_hook
 
+
 #endif /* LWIP_HDR_LWIPOPTS_H */
+
+
+/* CONFIG_VIDEO_APPLICATION (defined in platform_opts.h) sets PBUF_POOL_SIZE=880,
+ * TCP_SND_BUF=80*TCP_MSS, MEMP_NUM_TCP_SEG=480 — tuned for raw video.
+ * Override to values suitable for mixed Matter signaling + WebRTC streaming.
+ *
+ * MEM_SIZE is lwIP's fixed static heap (MEM_LIBC_MALLOC=0).  All CHIP
+ * PacketBuffers (CHIP_SYSTEM_CONFIG_PACKETBUFFER_LWIP_PBUF_RAM=1) AND TCP
+ * send-queue pbufs for RTSP/TURN streaming draw from this heap.  128 KB was
+ * insufficient: with RTSP TCP streaming active the heap is fully consumed,
+ * causing pbuf_alloc(PBUF_RAM) to return NULL.  CHIP then prints
+ * "PacketBuffer: pool EMPTY." and the mDNS broadcast for the commissioning
+ * window fails, so iOS cannot re-commission the device.
+ * 512 KB provides ample headroom (RTSP≈50 KB + TURN≈50 KB + CHIP≈50 KB)
+ * while costing only 384 KB of the 65 MB free PSRAM. */
+#undef PBUF_POOL_SIZE
+#define PBUF_POOL_SIZE          400
+
+#undef MEMP_NUM_PBUF
+#define MEMP_NUM_PBUF           64
+
+#undef MEM_SIZE
+#define MEM_SIZE                (512 * 1024)
+
+#undef TCP_SND_BUF
+#define TCP_SND_BUF             (16 * TCP_MSS)
+
+#undef TCP_SND_QUEUELEN
+#define TCP_SND_QUEUELEN        (4 * TCP_SND_BUF / TCP_MSS)
+
+#undef MEMP_NUM_TCP_SEG
+#define MEMP_NUM_TCP_SEG        64
+
+#undef TCP_WND
+#define TCP_WND                 (16 * TCP_MSS)
+
