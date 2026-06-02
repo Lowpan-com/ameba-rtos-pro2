@@ -686,9 +686,24 @@ void vPortFree(void *pv)
 		/* This casting is to keep the compiler from issuing warnings. */
 		pxLink = (void *) puc;
 
-		/* Check the block is actually allocated. */
-		configASSERT((pxLink->xBlockSize & xHeapInfo[idx].xBlockAllocatedBit) != 0);
-		configASSERT(pxLink->pxNextFreeBlock == NULL);
+		/* Check the block is actually allocated.
+		 *
+		 * NOTE: previously these were configASSERT() which abort the device on
+		 * mismatch.  When something else corrupts the heap header (e.g. a
+		 * use-after-free that writes mDNS TXT bytes like "\x04CM=2" into a
+		 * just-freed block) we don't want to take the entire device down — we
+		 * lose pairing, video and the user has to power-cycle.  Instead, log a
+		 * corruption diagnostic and SKIP the free.  The block is leaked but
+		 * the freelist stays sane and the system keeps running.  The original
+		 * if-block below already short-circuits when the conditions are false.
+		 */
+		if ((pxLink->xBlockSize & xHeapInfo[idx].xBlockAllocatedBit) == 0) {
+			dbg_printf("[HEAP] CORRUPTION (free) block=%p size=0x%x not marked allocated (UAF or double-free; leaking)\r\n",
+				pxLink, (unsigned)pxLink->xBlockSize);
+		} else if (pxLink->pxNextFreeBlock != NULL) {
+			dbg_printf("[HEAP] CORRUPTION (free) block=%p next=%p not NULL (header overwritten; leaking)\r\n",
+				pxLink, pxLink->pxNextFreeBlock);
+		}
 
 		if ((pxLink->xBlockSize & xHeapInfo[idx].xBlockAllocatedBit) != 0) {
 			if (pxLink->pxNextFreeBlock == NULL) {
