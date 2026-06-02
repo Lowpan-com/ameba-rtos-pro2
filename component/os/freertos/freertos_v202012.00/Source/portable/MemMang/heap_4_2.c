@@ -200,7 +200,12 @@ size_t xGetHeap0Start(void)
 }
 
 
-struct __heap_info xHeapInfo[2] = {
+/* __attribute__((aligned(8))): BlockLink_t is 8 bytes and the compiler emits
+ * LDRD (load-double, requires 8-byte alignment on Cortex-M33) for struct
+ * member accesses in prvInsertBlockIntoFreeList.  Without this the linker
+ * can place xHeapInfo at a 4-byte-aligned address, causing a UsageFault
+ * (CFSR=0x01000000 UNALIGNED) on the first heap block split. */
+struct __heap_info xHeapInfo[2] __attribute__((aligned(8))) = {
 	{.fGetHeapStart = xGetHeap0Start, .fGetHeapSize = xGetHeap0Size},
 	{.fGetHeapStart = xGetHeap1Start, .fGetHeapSize = xGetHeap1Size}
 };
