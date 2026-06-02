@@ -34,6 +34,7 @@
  * memory management pages of http://www.FreeRTOS.org for more information.
  */
 #include <stdlib.h>
+#include "diag.h"
 
 /* Defining MPU_WRAPPERS_INCLUDED_FROM_API_FILE prevents task.h from redefining
 all the API functions to use the MPU wrappers.  That should only be done when
@@ -307,8 +308,19 @@ void *pvPortMallocExt(size_t xWantedSize, int idx)
 				pxPreviousBlock = &xHeapInfo[idx].xStart;
 				pxBlock = xHeapInfo[idx].xStart.pxNextFreeBlock;
 				while ((pxBlock->xBlockSize < xWantedSize) && (pxBlock->pxNextFreeBlock != NULL)) {
+					BlockLink_t *pxNext = pxBlock->pxNextFreeBlock;
+					/* Defensive: see prvInsertBlockIntoFreeList for rationale. */
+					if (pxNext != xHeapInfo[idx].pxEnd &&
+					    ( ((size_t)pxNext & portBYTE_ALIGNMENT_MASK) != 0 ||
+					      (uint8_t *)pxNext <  xHeapInfo[idx].ucHeap ||
+					      (uint8_t *)pxNext >= (xHeapInfo[idx].ucHeap + xHeapInfo[idx].xTotalHeapSize) )) {
+						dbg_printf("[HEAP] CORRUPTION (malloc) idx=%d block=%p next=%p (truncating)\r\n",
+						          idx, pxBlock, pxNext);
+						pxBlock->pxNextFreeBlock = xHeapInfo[idx].pxEnd;
+						break;
+					}
 					pxPreviousBlock = pxBlock;
-					pxBlock = pxBlock->pxNextFreeBlock;
+					pxBlock = pxNext;
 				}
 
 				/* If the end marker was reached then a block of adequate size
@@ -822,10 +834,32 @@ static void prvInsertBlockIntoFreeList(BlockLink_t *pxBlockToInsert, int idx)
 	BlockLink_t *pxIterator;
 	uint8_t *puc;
 
+	/* Defensive: detect a corrupted free-list pointer before dereferencing it.
+	 * A valid pxNextFreeBlock must be either:
+	 *   - within the heap pool [ucHeap, ucHeap + xTotalHeapSize),  or
+	 *   - == pxEnd (the end-of-list sentinel), or
+	 *   - 32-byte aligned (because portBYTE_ALIGNMENT == 32)
+	 * If we ever follow a corrupted pointer we get a UsageFault in the loop
+	 * below ("ldr r3, [r3]" on an unaligned address).  Instead, truncate the
+	 * list at the corrupted block, log diagnostics, and continue running.
+	 * This leaks any free blocks beyond the corruption, but keeps the device
+	 * alive long enough to investigate the source of the corruption. */
+	#define HEAP_PTR_LOOKS_VALID(p, info)                                          \
+	    ( ((p) == (info)->pxEnd) ||                                                \
+	      ( (((size_t)(p) & portBYTE_ALIGNMENT_MASK) == 0) &&                      \
+	        ((uint8_t *)(p) >= (info)->ucHeap) &&                                  \
+	        ((uint8_t *)(p) <  ((info)->ucHeap + (info)->xTotalHeapSize)) ) )
+
 	/* Iterate through the list until a block is found that has a higher address
 	than the block being inserted. */
 	for (pxIterator = &xHeapInfo[idx].xStart; pxIterator->pxNextFreeBlock < pxBlockToInsert; pxIterator = pxIterator->pxNextFreeBlock) {
-		/* Nothing to do here, just iterate to the right position. */
+		BlockLink_t *pxNext = pxIterator->pxNextFreeBlock;
+		if (!HEAP_PTR_LOOKS_VALID(pxNext, &xHeapInfo[idx])) {
+			dbg_printf("[HEAP] CORRUPTION detected idx=%d iter=%p next=%p (truncating)\r\n",
+			          idx, pxIterator, pxNext);
+			pxIterator->pxNextFreeBlock = xHeapInfo[idx].pxEnd;
+			break;
+		}
 	}
 
 	/* Do the block being inserted, and the block it is being inserted after
