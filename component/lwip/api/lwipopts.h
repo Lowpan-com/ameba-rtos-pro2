@@ -337,8 +337,8 @@ extern unsigned int sys_now(void);
 #endif
 
 #if defined(CONFIG_INIC_IPC_HIGH_TP) && CONFIG_INIC_IPC_HIGH_TP
-##undef MEM_SIZE
-##define MEM_SIZE (34*1024)
+#undef MEM_SIZE
+#define MEM_SIZE (34*1024)
 
 #undef MEMP_NUM_TCP_SEG
 #define MEMP_NUM_TCP_SEG        132
