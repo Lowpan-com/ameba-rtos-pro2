@@ -579,27 +579,32 @@ Certain platform allows computing and verifying the IP, UDP, TCP and ICMP checks
 #endif /* LWIP_HDR_LWIPOPTS_H */
 
 
-/* CONFIG_VIDEO_APPLICATION (defined in platform_opts.h) sets PBUF_POOL_SIZE=880,
- * TCP_SND_BUF=80*TCP_MSS, MEMP_NUM_TCP_SEG=480 — tuned for raw video.
- * Override to values suitable for mixed Matter signaling + WebRTC streaming.
+/* CONFIG_VIDEO_APPLICATION (defined in platform_opts.h) sets:
+ *   MEM_SIZE=512KB, TCP_SND_BUF=80*TCP_MSS, MEMP_NUM_TCP_SEG=480, PBUF_POOL_SIZE=880
+ * tuned for raw video throughput.
  *
- * MEM_SIZE is lwIP's fixed static heap (MEM_LIBC_MALLOC=0).  All CHIP
- * PacketBuffers (CHIP_SYSTEM_CONFIG_PACKETBUFFER_LWIP_PBUF_RAM=1) AND TCP
- * send-queue pbufs for RTSP/TURN streaming draw from this heap.  128 KB was
- * insufficient: with RTSP TCP streaming active the heap is fully consumed,
- * causing pbuf_alloc(PBUF_RAM) to return NULL.  CHIP then prints
- * "PacketBuffer: pool EMPTY." and the mDNS broadcast for the commissioning
- * window fails, so iOS cannot re-commission the device.
- * 512 KB provides ample headroom (RTSP≈50 KB + TURN≈50 KB + CHIP≈50 KB)
- * while costing only 384 KB of the 65 MB free PSRAM. */
+ * Problem: CONFIG_VIDEO_APPLICATION already reserves MEM_SIZE=512KB as a
+ * STATIC BSS array (MEM_LIBC_MALLOC=0).  With concurrent RTSP streaming,
+ * WebRTC/TURN, and CHIP commissioning all using pbuf_alloc(PBUF_RAM), this
+ * fixed 512KB heap becomes fully exhausted.  CHIP then prints
+ * "PacketBuffer: pool EMPTY." and mem_malloc crashes with an imprecise bus
+ * fault when the corrupted free-list is traversed.
+ *
+ * Fix: enable MEM_LIBC_MALLOC so all pbuf_alloc(PBUF_RAM) calls go through
+ * pvPortMalloc() backed by the 65 MB PSRAM heap instead of a fixed static
+ * array.  MEM_SIZE is then ignored.  TCP send-buffer limits are reduced from
+ * the raw-video-tuned 80*TCP_MSS down to values suitable for mixed
+ * Matter+WebRTC+RTSP usage, freeing MEMP_NUM_TCP_SEG pool entries. */
+
+/* Use PSRAM system heap for all PBUF_RAM allocations — no fixed size limit */
+#undef MEM_LIBC_MALLOC
+#define MEM_LIBC_MALLOC         1
+
 #undef PBUF_POOL_SIZE
 #define PBUF_POOL_SIZE          400
 
 #undef MEMP_NUM_PBUF
 #define MEMP_NUM_PBUF           64
-
-#undef MEM_SIZE
-#define MEM_SIZE                (512 * 1024)
 
 #undef TCP_SND_BUF
 #define TCP_SND_BUF             (16 * TCP_MSS)
